@@ -1,23 +1,85 @@
 /**
- * A @Memoize() decorator similar to
- * https://www.npmjs.com/package/typescript-memoize. Differences:
- * 1. If used to memoize async functions, it clears the memoize cache if the
- *    promise gets rejected (i.e. it doesn't memoize exceptions in async
- *    functions).
- * 2. Stronger typing for internal code.
+ * Additional options for `@Memoize()` decorator.
  */
-export function Memoize(hasher?: (...args: any[]) => unknown) {
-  return (
-    _target: object,
-    _propertyKey: string | symbol,
-    descriptor: TypedPropertyDescriptor<any>
-  ) => {
-    if (descriptor.value !== null && descriptor.value !== undefined) {
-      descriptor.value = buildNewMethod(descriptor.value, hasher);
+export interface MemoizeOptions {
+  /** Defaults to `true`. If true, rejected Promises returned from an async
+   * method will be removed from the cache as soon as the method finishes. */
+  clearOnReject?: boolean;
+  /** Defaults to `false`. If true, successfully resolved Promises returned from
+   * an async method will be removed from the cache as soon as the method
+   * finishes. This is a convenient mode for the cases when we want to coalesce
+   * multiple parallel executions of some method (e.g. when there is a burst of
+   * runs), but we don't want to prevent the method from further running. */
+  clearOnResolve?: boolean;
+}
+
+/**
+ * Remembers the returned value of a decorated method or getter in a hidden
+ * `this` object's property, so next time the method is called, the value will
+ * be returned immediately, without re-executing the method. This also works for
+ * async methods which return a Promise: in this case, multiple parallel calls
+ * to that method will coalesce into one call.
+ *
+ * All `@Memoize()` calls, for both methods and getters, accept a hasher
+ * function with the same list of arguments as the method itself (or, in case of
+ * a getter, with no arguments). The slot for the saved value will depend on the
+ * value returned by the hasher.
+ */
+export function Memoize<TThis, TValue>(
+  hasher: TValue extends (...args: never[]) => unknown
+    ? (this: TThis, ...args: Parameters<TValue>) => unknown
+    : (this: TThis) => unknown,
+  options?: MemoizeOptions
+): (
+  target: TThis,
+  propertyKey: string | symbol,
+  descriptor: { value?: TValue }
+) => void;
+
+/**
+ * Remembers the returned value of a decorated method or getter in a hidden
+ * `this` object's property, so next time the method is called, the value will
+ * be returned immediately, without re-executing the method. This also works for
+ * async methods which return a Promise: in this case, multiple parallel calls
+ * to that method will coalesce into one call.
+ *
+ * Almost all `@Memoize()` calls may also omit the hasher function. Then, for
+ * 0-argument methods or getters, the slot for the saved value will be fixed.
+ * For 1-argument methods, the slot will be chosen based on that single
+ * argument's value. For methods with 2+ arguments, you must provide your own
+ * hasher function.
+ */
+export function Memoize<TThis, TValue>(
+  options?: MemoizeOptions
+): (
+  target: TThis,
+  propertyKey: string | symbol,
+  descriptor: { value?: TValue }
+) => ((a1: unknown, a2: unknown, ...args: unknown[]) => never) extends TValue
+  ? "provide-hasher-when-method-has-more-than-one-arg"
+  : void;
+
+/**
+ * A @Memoize() decorator implementation, inspired by:
+ * https://www.npmjs.com/package/typescript-memoize.
+ */
+export function Memoize<TThis extends object, TArgs extends any[]>(
+  a1?: ((this: TThis, ...args: TArgs) => unknown) | MemoizeOptions,
+  a2?: MemoizeOptions
+): (
+  target: TThis,
+  propertyKey: string | symbol,
+  descriptor: TypedPropertyDescriptor<(this: TThis, ...args: TArgs) => any>
+) => void {
+  const [hasher, options] =
+    typeof a1 === "function" ? [a1, a2] : [undefined, a1];
+  return (_target, _propertyKey, descriptor) => {
+    if (typeof descriptor.value === "function") {
+      descriptor.value = buildNewMethod(descriptor.value, hasher, options);
     } else if (descriptor.get) {
-      descriptor.get = buildNewMethod(descriptor.get, hasher);
+      descriptor.get = buildNewMethod(descriptor.get, hasher, options);
     } else {
-      throw "Only put a @Memoize() decorator on a method or get accessor.";
+      throw "Only put @Memoize() decorator on a method or get accessor.";
     }
   };
 }
@@ -40,7 +102,11 @@ function buildNewMethod<
   TRet
 >(
   origMethod: (this: TThis, ...args: TArgs) => TRet,
-  hasher?: (...args: TArgs) => unknown
+  hasher?: (...args: TArgs) => unknown,
+  { clearOnReject, clearOnResolve }: MemoizeOptions = {
+    clearOnReject: true,
+    clearOnResolve: false,
+  }
 ): (this: TThis, ...args: TArgs) => TRet {
   const identifier = ++counter;
 
@@ -67,9 +133,16 @@ function buildNewMethod<
         value = map.get(hashKey)!;
       } else {
         value = origMethod.apply(this, args);
-        if (value instanceof Promise) {
+
+        if (clearOnReject && value instanceof Promise) {
           value = value.catch(
             deleteMapKeyAndRethrow.bind(undefined, map, hashKey)
+          ) as TRet;
+        }
+
+        if (clearOnResolve && value instanceof Promise) {
+          value = value.then(
+            deleteMapKeyAndReturn.bind(undefined, map, hashKey)
           ) as TRet;
         }
 
@@ -82,9 +155,16 @@ function buildNewMethod<
         value = this[propValName]!;
       } else {
         value = origMethod.apply(this, args);
-        if (value instanceof Promise) {
+
+        if (clearOnReject && value instanceof Promise) {
           value = value.catch(
-            deleteObjKeyAndRethrow.bind(undefined, this, propValName)
+            deleteObjPropAndRethrow.bind(undefined, this, propValName)
+          ) as TRet;
+        }
+
+        if (clearOnResolve && value instanceof Promise) {
+          value = value.then(
+            deleteObjPropAndReturn.bind(undefined, this, propValName)
           ) as TRet;
         }
 
@@ -109,7 +189,7 @@ function deleteMapKeyAndRethrow(
   map: Map<unknown, unknown>,
   key: unknown,
   e: unknown
-) {
+): never {
   map.delete(key);
   throw e;
 }
@@ -118,11 +198,37 @@ function deleteMapKeyAndRethrow(
  * A helper function to just not use "=>" closures and thus control, which
  * variables will be retained from garbage collection.
  */
-function deleteObjKeyAndRethrow(
+function deleteObjPropAndRethrow(
   obj: Record<string, unknown>,
   key: string,
   e: unknown
-) {
+): never {
   delete obj[key];
   throw e;
+}
+
+/**
+ * A helper function to just not use "=>" closures and thus control, which
+ * variables will be retained from garbage collection.
+ */
+function deleteMapKeyAndReturn<T>(
+  map: Map<unknown, unknown>,
+  key: unknown,
+  value: T
+): T {
+  map.delete(key);
+  return value;
+}
+
+/**
+ * A helper function to just not use "=>" closures and thus control, which
+ * variables will be retained from garbage collection.
+ */
+function deleteObjPropAndReturn<T>(
+  obj: Record<string, unknown>,
+  key: string,
+  value: T
+): T {
+  delete obj[key];
+  return value;
 }

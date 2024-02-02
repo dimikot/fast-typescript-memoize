@@ -1,24 +1,39 @@
 # fast-typescript-memoize: fast memoization decorator and other helpers with 1st class support for Promises
 
-## @Memoize() decorator
+## `@Memoize()` decorator
 
-A `@Memoize()` TypeScript decorator similar to
+Remembers the returned value of a decorated method or getter in a hidden `this`
+object's property, so next time the method is called, the value will be returned
+immediately, without re-executing the method. This also works for async methods
+which return a Promise: in this case, multiple parallel calls to that method
+will coalesce into one call.
+
+To work properly, requires TypeScript v5+.
+
+The idea of `@Memoize()` decorator is brought from
 [typescript-memoize](https://www.npmjs.com/package/typescript-memoize).
-
 Differences:
 
-1. If used to memoize async functions, it clears the memoize cache if the
-   promise gets rejected (i.e. it doesn't memoize exceptions in async
-   functions).
-2. Stronger typing for internal code.
-3. Does not support any notion of expiration.
-
+1. If used to memoize async methods, by default (and when
+   `clearOnResolve=true`), it clears the memoize cache as soon as the Promise
+   gets rejected (i.e. it doesn't memoize exceptions in async methods). Parallel
+   async calls to the same method will still be coalesced into one call though
+   (until the Promise rejects).
+2. A special mode is added, `clearOnResolve`. If `true`, successfully resolved
+   Promises returned from an async method will be removed from the cache as soon
+   as the method finishes. This is a convenient mode for the cases when we want
+   to coalesce multiple parallel executions of some method (e.g. when there is a
+   burst of runs), but we don't want to prevent the method from further running.
+3. Strong typing for the optional hasher handler, including types of arguments
+   and even the type of `this`.
+4. Does not support any notion of expiration.
 
 ```ts
 import { Memoize } from "fast-typescript-memoize";
 
 class Class {
   private count = 0;
+  private some = 42;
 
   @Memoize()
   method0() {
@@ -30,21 +45,33 @@ class Class {
     return count++;
   }
 
-  @Memoize((arg1: string, arg2: number) => `${arg1}#${arg2}`)
+  @Memoize((arg1, arg2) => `${arg1}#${arg2}`)
   method2(arg1: string, arg2: number) {
     return count++;
   }
 
+  @Memoize(function (arg1, arg2) { return `${this.some}:${arg1}#${arg2}`; })
+  method3(arg1: string, arg2: number) {
+    return count++;
+  }
+
   @Memoize()
-  asyncMethod(arg: string) {
+  async asyncMethod(arg: string) {
     count++;
     if (arg == "ouch") {
       throw "ouch";
     }
   }
+
+  @Memoize({ clearOnResolve: true })
+  async asyncCoalescingMethod(arg: string) {
+    await delay(100);
+    count++;
+  }
 }
 
 const obj = new Class();
+
 obj.method0(); // count is incremented
 obj.method0(); // count is NOT incremented
 
@@ -55,10 +82,21 @@ obj.method1("def"); // count is incremented
 obj.method2("abc", 42); // count is incremented
 obj.method2("abc", 42); // count is NOT incremented
 
+obj.method3("abc", 42); // count is incremented (strongly typed `this`)
+obj.method3("abc", 42); // count is NOT incremented
+
 await asyncMethod("ok"); // count is incremented
 await asyncMethod("ok"); // count is NOT incremented
 await asyncMethod("ouch"); // count is incremented, exception is thrown
 await asyncMethod("ouch"); // count is incremented, exception is thrown
+
+await asyncCoalescingMethod("ok"); // count is incremented
+await asyncCoalescingMethod("ok"); // count is incremented again
+const [c1, c2] = await Promise.all([
+  asyncCoalescingMethod("ok"), // count is incremented
+  asyncCoalescingMethod("ok"), // not incremented! coalescing parallel calls
+]);
+assert(c1 === c2);
 ```
 
 ## memoize0(obj, tag, func)

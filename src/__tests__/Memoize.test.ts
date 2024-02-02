@@ -1,24 +1,99 @@
+import delay from "delay";
 import { Memoize } from "..";
 
 test("memoizes Promise", async () => {
   class Cls {
     private count = 0;
+    private some = 42;
+
+    incrementSome() {
+      this.some++;
+    }
 
     @Memoize()
-    async method() {
+    get getter0a() {
+      return this.count++;
+    }
+
+    @Memoize(function () {
+      return this.some;
+    })
+    get getter0b(): Promise<number> {
+      return delay(10).then(() => this.count++);
+    }
+
+    @Memoize()
+    async method0a() {
       return this.count++;
     }
 
     @Memoize()
-    async method1(_arg: string) {
+    async method1a(_arg: string) {
       return this.count++;
     }
+
+    @Memoize((a1) => a1.substring(0, 1))
+    async method1b(_arg: string) {
+      return this.count++;
+    }
+
+    @Memoize((a1, a2) => a1.substring(0, 1) + a2)
+    async method2a(_arg1: string, _arg2: number) {
+      return this.count++;
+    }
+
+    @Memoize(function (a1, a2) {
+      return this.some + a1.substring(0, 1) + a2;
+    })
+    async method2b(_arg1: string, _arg2: number) {
+      return this.count++;
+    }
+
+    /*
+    // The following definitions must FAIL typechecking.
+
+    @Memoize((a) => a)
+    get getter0c() {
+      return this.count++;
+    }
+
+    @Memoize((a) => a)
+    async method0c() {
+      return this.count++;
+    }
+
+    @Memoize()
+    async method2c(_arg1: string, _arg2: number) {
+      return this.count++;
+    }
+
+    @Memoize({ clearOnResolve: true })
+    async method2cOptions(_arg1: string, _arg2: number) {
+      return this.count++;
+    }
+    */
   }
 
   const obj = new Cls();
-  expect(await obj.method()).toEqual(await obj.method());
-  expect(await obj.method1("a")).toEqual(await obj.method1("a"));
-  expect(await obj.method1("c")).not.toEqual(await obj.method1("d"));
+
+  expect(obj.getter0a).toEqual(obj.getter0a);
+
+  expect(await obj.getter0b).toEqual(await obj.getter0b);
+
+  expect(await obj.method0a()).toEqual(await obj.method0a());
+
+  expect(await obj.method1a("a")).toEqual(await obj.method1a("a"));
+  expect(await obj.method1a("c")).not.toEqual(await obj.method1a("d"));
+
+  expect(await obj.method2a("ab", 10)).toEqual(await obj.method2a("a*", 10));
+  expect(await obj.method2a("ab", 10)).not.toEqual(
+    await obj.method2a("a*", 20)
+  );
+
+  const ret = await obj.method2b("abc", 10);
+  expect(ret).toEqual(await obj.method2b("a**", 10));
+  obj.incrementSome();
+  expect(ret).not.toEqual(await obj.method2b("a**", 10));
 });
 
 test("does not memoize rejected Promise", async () => {
@@ -41,4 +116,80 @@ test("does not memoize rejected Promise", async () => {
   await expect(obj.method()).rejects.toThrow("error 1");
   await expect(obj.method1("a")).rejects.toThrow("error 2");
   await expect(obj.method1("a")).rejects.toThrow("error 3");
+});
+
+test("does not memoize resolved Promise if specified in options", async () => {
+  class Cls {
+    private count = 0;
+    private some = 42;
+
+    incrementSome() {
+      this.some++;
+    }
+
+    @Memoize({ clearOnResolve: true })
+    get getter0aOptions(): Promise<number> {
+      return delay(10).then(() => this.count++);
+    }
+
+    @Memoize({ clearOnResolve: true })
+    async method0aOptions() {
+      await delay(10);
+      return this.count++;
+    }
+
+    @Memoize({ clearOnResolve: true })
+    async method1aOptions(_arg: string) {
+      await delay(10);
+      return this.count++;
+    }
+
+    @Memoize(
+      function (a1, a2) {
+        return this.some + a1.substring(0, 1) + a2;
+      },
+      { clearOnResolve: true }
+    )
+    async method2aOptions(_arg1: string, _arg2: number) {
+      await delay(10);
+      return this.count++;
+    }
+  }
+
+  const obj = new Cls();
+
+  {
+    const p1 = obj.getter0aOptions;
+    const p2 = obj.getter0aOptions;
+    expect(await p1).toEqual(await p2);
+    expect(await p1).not.toEqual(await obj.getter0aOptions);
+  }
+
+  {
+    const p1 = obj.method0aOptions();
+    const p2 = obj.method0aOptions();
+    expect(await p1).toEqual(await p2);
+    expect(await p1).not.toEqual(await obj.method0aOptions());
+  }
+
+  {
+    const p1 = obj.method1aOptions("a");
+    const p2 = obj.method1aOptions("a");
+    expect(await p1).toEqual(await p2);
+    expect(await p1).not.toEqual(await obj.method1aOptions("a"));
+  }
+
+  {
+    const p1 = obj.method2aOptions("ab", 10);
+    const p2 = obj.method2aOptions("a*", 10);
+    expect(await p1).toEqual(await p2);
+    expect(await p1).not.toEqual(await obj.method2aOptions("a*", 10));
+  }
+
+  {
+    const p1 = obj.method2aOptions("xy", 10);
+    obj.incrementSome();
+    const p2 = obj.method2aOptions("xy", 10);
+    expect(await p1).not.toEqual(await p2);
+  }
 });
