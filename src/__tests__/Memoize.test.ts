@@ -23,6 +23,11 @@ test("memoizes Promise", async () => {
     }
 
     @Memoize()
+    get getter0c(): object {
+      return { count: this.count++ };
+    }
+
+    @Memoize()
     async method0a() {
       return this.count++;
     }
@@ -49,26 +54,36 @@ test("memoizes Promise", async () => {
       return this.count++;
     }
 
+    @Memoize((a1, a2) => a1.substring(0, 1) + a2)
+    async method3a(_arg1: string, _arg2: number, _arg3: boolean) {
+      return this.count++;
+    }
+
     /*
     // The following definitions must FAIL typechecking.
 
     @Memoize((a) => a)
-    get getter0c() {
+    get getter0err() {
       return this.count++;
     }
 
     @Memoize((a) => a)
-    async method0c() {
+    async method0err() {
       return this.count++;
     }
 
     @Memoize()
-    async method2c(_arg1: string, _arg2: number) {
+    async method2err(_arg1: string, _arg2: number) {
       return this.count++;
     }
 
     @Memoize({ clearOnResolve: true })
-    async method2cOptions(_arg1: string, _arg2: number) {
+    async method2errOptions(_arg1: string, _arg2: number) {
+      return this.count++;
+    }
+
+    @Memoize()
+    async method3err(_arg1: string, _arg2: number, _arg3: boolean) {
       return this.count++;
     }
     */

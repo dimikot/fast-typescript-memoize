@@ -56,7 +56,9 @@ export function Memoize<TThis, TValue>(
   propertyKey: string | symbol,
   descriptor: { value?: TValue }
 ) => ((a1: unknown, a2: unknown, ...args: unknown[]) => never) extends TValue
-  ? "provide-hasher-when-method-has-more-than-one-arg"
+  ? TValue extends (a1: never, a2: never, ...args: never[]) => unknown
+    ? "provide-hasher-when-method-has-more-than-one-arg"
+    : void
   : void;
 
 /**

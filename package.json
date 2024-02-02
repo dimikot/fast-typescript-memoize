@@ -1,6 +1,6 @@
 {
   "name": "fast-typescript-memoize",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Fast memoization decorator and other helpers with 1st class support for Promises.",
   "homepage": "https://github.com/dimikot/fast-typescript-memoize#readme",
   "author": "Dimi Kot",
