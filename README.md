@@ -27,6 +27,9 @@ Differences:
 3. Strong typing for the optional hasher handler, including types of arguments
    and even the type of `this`.
 4. Does not support any notion of expiration.
+5. When the 1st argument of the method is an object (or when hasher handler
+   returns an object), it is not retained from GC, so you can memoize on object
+   args safely, without thinking about memory leaks.
 
 ```ts
 import { Memoize } from "fast-typescript-memoize";
@@ -45,13 +48,18 @@ class Class {
     return count++;
   }
 
+  @Memoize()
+  method1obj(arg: object) {
+    return count++;
+  }
+
   @Memoize((arg1, arg2) => `${arg1}#${arg2}`)
   method2(arg1: string, arg2: number) {
     return count++;
   }
 
   @Memoize(function (arg1, arg2) { return `${this.some}:${arg1}#${arg2}`; })
-  method3(arg1: string, arg2: number) {
+  method2this(arg1: string, arg2: number) {
     return count++;
   }
 
@@ -71,6 +79,7 @@ class Class {
 }
 
 const obj = new Class();
+const arg = { my: 42 };
 
 obj.method0(); // count is incremented
 obj.method0(); // count is NOT incremented
@@ -79,11 +88,14 @@ obj.method1("abc"); // count is incremented
 obj.method1("abc"); // count is NOT incremented
 obj.method1("def"); // count is incremented
 
+obj.method1obj(arg); // count is incremented, arg is not retained
+obj.method1obj(arg); // count is NOT incremented
+
 obj.method2("abc", 42); // count is incremented
 obj.method2("abc", 42); // count is NOT incremented
 
-obj.method3("abc", 42); // count is incremented (strongly typed `this`)
-obj.method3("abc", 42); // count is NOT incremented
+obj.method2this("abc", 42); // count is incremented (strongly typed `this`)
+obj.method2this("abc", 42); // count is NOT incremented
 
 await asyncMethod("ok"); // count is incremented
 await asyncMethod("ok"); // count is NOT incremented

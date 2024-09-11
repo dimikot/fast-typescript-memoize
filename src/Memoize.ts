@@ -70,16 +70,26 @@ export function Memoize<TThis extends object, TArgs extends any[]>(
   a2?: MemoizeOptions
 ): (
   target: TThis,
-  propertyKey: string | symbol,
+  propName: string | symbol,
   descriptor: TypedPropertyDescriptor<(this: TThis, ...args: TArgs) => any>
 ) => void {
   const [hasher, options] =
     typeof a1 === "function" ? [a1, a2] : [undefined, a1];
-  return (_target, _propertyKey, descriptor) => {
+  return (_target, propName, descriptor) => {
     if (typeof descriptor.value === "function") {
-      descriptor.value = buildNewMethod(descriptor.value, hasher, options);
+      descriptor.value = buildNewMethod(
+        descriptor.value,
+        propName,
+        hasher,
+        options
+      );
     } else if (descriptor.get) {
-      descriptor.get = buildNewMethod(descriptor.get, hasher, options);
+      descriptor.get = buildNewMethod(
+        descriptor.get,
+        propName,
+        hasher,
+        options
+      );
     } else {
       throw "Only put @Memoize() decorator on a method or get accessor.";
     }
@@ -88,8 +98,9 @@ export function Memoize<TThis extends object, TArgs extends any[]>(
 
 let counter = 0;
 
-type PropValName = `__memoized_value_${number}`;
-type PropMapName = `__memoized_map_${number}`;
+type PropWeakName = `__memoized_weak_${string}_${number}`;
+type PropMapName = `__memoized_map_${string}_${number}`;
+type PropValName = `__memoized_val_${string}_${number}`;
 
 /**
  * Builds a new function which will be returned instead of the original
@@ -97,62 +108,110 @@ type PropMapName = `__memoized_map_${number}`;
  */
 function buildNewMethod<
   TThis extends Partial<{
-    [k: PropValName]: TRet;
+    [k: PropWeakName]: WeakMap<object, TRet>;
     [k: PropMapName]: Map<unknown, TRet>;
+    [k: PropValName]: TRet;
   }>,
   TArgs extends unknown[],
   TRet
 >(
   origMethod: (this: TThis, ...args: TArgs) => TRet,
+  propName: string | symbol,
   hasher?: (...args: TArgs) => unknown,
   { clearOnReject, clearOnResolve }: MemoizeOptions = {
     clearOnReject: true,
     clearOnResolve: false,
   }
 ): (this: TThis, ...args: TArgs) => TRet {
-  const identifier = ++counter;
+  // Depending on the arguments of the method we're memoizing, we use one of 3
+  // storages (with some code boilerplate for performance):
+  // - If the arguments hash (defaults to the 1st argument) is a JS OBJECT, we
+  //   store the memoized value in a WeakMap keyed by that object. It allows JS
+  //   GC to garbage collect that object since it's not retained in the internal
+  //   memoized WeakMap. Motivation: if we lose the object, we obviously can't
+  //   pass it to any method with `Memoize()`, and thus, we anyways won't be
+  //   able to access the memoized value, so WeakMap is a perfect hit here.
+  // - If the arguments hash is of a PRIMITIVE TYPE, we store the memoized value
+  //   in a regular Map. Primitive types (like strings, numbers etc.) can't be
+  //   used as WeakMap keys for obvious reasons.
+  // - And lastly, if it's a NO-ARGUMENTS METHOD, we store the value in a hidden
+  //   object property directly. This is the most frequent use case.
+  const propWeakName: PropWeakName = `__memoized_weak_${propName.toString()}_${counter}`;
+  const propMapName: PropMapName = `__memoized_map_${propName.toString()}_${counter}`;
+  const propValName: PropValName = `__memoized_val_${propName.toString()}_${counter}`;
+  counter++;
 
   return function (this: TThis, ...args: TArgs): TRet {
     let value: TRet;
 
     if (hasher || args.length > 0) {
-      const propMapName: PropMapName = `__memoized_map_${identifier}`;
-
-      // Get or create map
-      if (!this.hasOwnProperty(propMapName)) {
-        Object.defineProperty(this, propMapName, {
-          configurable: false,
-          enumerable: false,
-          writable: false,
-          value: new Map(),
-        });
-      }
-
-      const map = this[propMapName]!;
       const hashKey = hasher ? hasher.apply(this, args) : args[0];
 
-      if (map.has(hashKey)) {
-        value = map.get(hashKey)!;
+      if (hashKey !== null && typeof hashKey === "object") {
+        // Arg (or hash) is an object: WeakMap.
+        if (!this.hasOwnProperty(propWeakName)) {
+          Object.defineProperty(this, propWeakName, {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            value: new WeakMap(),
+          });
+        }
+
+        const weak = this[propWeakName]!;
+        if (weak.has(hashKey)) {
+          value = weak.get(hashKey)!;
+        } else {
+          value = origMethod.apply(this, args);
+
+          if (clearOnReject && value instanceof Promise) {
+            value = value.catch(
+              deleteWeakKeyAndRethrow.bind(undefined, weak, hashKey)
+            ) as TRet;
+          }
+
+          if (clearOnResolve && value instanceof Promise) {
+            value = value.then(
+              deleteWeakKeyAndReturn.bind(undefined, weak, hashKey)
+            ) as TRet;
+          }
+
+          weak.set(hashKey, value);
+        }
       } else {
-        value = origMethod.apply(this, args);
-
-        if (clearOnReject && value instanceof Promise) {
-          value = value.catch(
-            deleteMapKeyAndRethrow.bind(undefined, map, hashKey)
-          ) as TRet;
+        // Arg (or hash) is a primitive type: Map.
+        if (!this.hasOwnProperty(propMapName)) {
+          Object.defineProperty(this, propMapName, {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            value: new Map(),
+          });
         }
 
-        if (clearOnResolve && value instanceof Promise) {
-          value = value.then(
-            deleteMapKeyAndReturn.bind(undefined, map, hashKey)
-          ) as TRet;
-        }
+        const map = this[propMapName]!;
+        if (map.has(hashKey)) {
+          value = map.get(hashKey)!;
+        } else {
+          value = origMethod.apply(this, args);
 
-        map.set(hashKey, value);
+          if (clearOnReject && value instanceof Promise) {
+            value = value.catch(
+              deleteMapKeyAndRethrow.bind(undefined, map, hashKey)
+            ) as TRet;
+          }
+
+          if (clearOnResolve && value instanceof Promise) {
+            value = value.then(
+              deleteMapKeyAndReturn.bind(undefined, map, hashKey)
+            ) as TRet;
+          }
+
+          map.set(hashKey, value);
+        }
       }
     } else {
-      const propValName: PropValName = `__memoized_value_${identifier}`;
-
+      // No arg: plain object property.
       if (this.hasOwnProperty(propValName)) {
         value = this[propValName]!;
       } else {
@@ -183,10 +242,20 @@ function buildNewMethod<
   };
 }
 
-/**
- * A helper function to just not use "=>" closures and thus control, which
- * variables will be retained from garbage collection.
- */
+//
+// Below are helper functions to just not use "=>" closures and thus control,
+// which variables will be retained from garbage collection.
+//
+
+function deleteWeakKeyAndRethrow(
+  weak: WeakMap<object, unknown>,
+  key: object,
+  e: unknown
+): never {
+  weak.delete(key);
+  throw e;
+}
+
 function deleteMapKeyAndRethrow(
   map: Map<unknown, unknown>,
   key: unknown,
@@ -196,10 +265,6 @@ function deleteMapKeyAndRethrow(
   throw e;
 }
 
-/**
- * A helper function to just not use "=>" closures and thus control, which
- * variables will be retained from garbage collection.
- */
 function deleteObjPropAndRethrow(
   obj: Record<string, unknown>,
   key: string,
@@ -209,10 +274,15 @@ function deleteObjPropAndRethrow(
   throw e;
 }
 
-/**
- * A helper function to just not use "=>" closures and thus control, which
- * variables will be retained from garbage collection.
- */
+function deleteWeakKeyAndReturn<T>(
+  weak: WeakMap<object, unknown>,
+  key: object,
+  value: T
+): T {
+  weak.delete(key);
+  return value;
+}
+
 function deleteMapKeyAndReturn<T>(
   map: Map<unknown, unknown>,
   key: unknown,
@@ -222,10 +292,6 @@ function deleteMapKeyAndReturn<T>(
   return value;
 }
 
-/**
- * A helper function to just not use "=>" closures and thus control, which
- * variables will be retained from garbage collection.
- */
 function deleteObjPropAndReturn<T>(
   obj: Record<string, unknown>,
   key: string,

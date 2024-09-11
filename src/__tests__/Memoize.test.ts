@@ -42,6 +42,19 @@ test("memoizes Promise", async () => {
       return this.count++;
     }
 
+    @Memoize()
+    method1c(_arg1: object) {
+      return this.count++;
+    }
+
+    @Memoize((a1) => {
+      a1.hasherCalls++;
+      return a1;
+    })
+    async method1d(_arg1: { hasherCalls: number }) {
+      return this.count++;
+    }
+
     @Memoize((a1, a2) => a1.substring(0, 1) + a2)
     async method2a(_arg1: string, _arg2: number) {
       return this.count++;
@@ -90,6 +103,7 @@ test("memoizes Promise", async () => {
   }
 
   const obj = new Cls();
+  const arg = { hasherCalls: 0 };
 
   expect(obj.getter0a).toEqual(obj.getter0a);
 
@@ -99,6 +113,14 @@ test("memoizes Promise", async () => {
 
   expect(await obj.method1a("a")).toEqual(await obj.method1a("a"));
   expect(await obj.method1a("c")).not.toEqual(await obj.method1a("d"));
+
+  expect(await obj.method1b("c111")).toEqual(await obj.method1b("c222"));
+
+  expect(obj.method1c({ x: 10 })).not.toEqual(obj.method1c({ x: 10 }));
+  expect(obj.method1c(arg)).toEqual(obj.method1c(arg));
+
+  expect(await obj.method1d(arg)).toEqual(await obj.method1d(arg));
+  expect(arg.hasherCalls).toEqual(2);
 
   expect(await obj.method2a("ab", 10)).toEqual(await obj.method2a("a*", 10));
   expect(await obj.method2a("ab", 10)).not.toEqual(
